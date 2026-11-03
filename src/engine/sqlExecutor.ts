@@ -1,4 +1,4 @@
-import { DatabaseSchema, QueryResult } from '../types';
+import { DatabaseSchema, QueryResult, TableDefinition } from '../types';
 import { validateSql } from './sqlValidator';
 
 export async function executeSql(
@@ -8,49 +8,27 @@ export async function executeSql(
 ): Promise<QueryResult> {
   const startTime = performance.now();
 
-  // Validate first
+  // 1. Pre-Execution Validation & Policy Check
   const validation = validateSql(sql, schema);
   if (!validation.isValid) {
     const errorMsg = validation.issues.find(i => i.type === 'error')?.message || 'SQL validation failed.';
     throw new Error(errorMsg);
   }
 
-  // Artificial latency simulation (15ms - 40ms) to reflect real DB call
+  // Latency simulation (12ms - 35ms)
   if (simulateDelay) {
-    await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 25) + 15));
+    await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 20) + 12));
   }
 
   const cleanSql = sql.trim().replace(/;$/, '');
   const lowerSql = cleanSql.toLowerCase();
 
-  // Case: Special predefined query results for high fidelity
-  // 1. "SELECT * FROM employees"
-  if (lowerSql === 'select * from employees') {
-    const empTable = schema.tables.find(t => t.name === 'employees');
-    const rows = empTable ? [...empTable.data] : [];
-    const columns = empTable ? empTable.columns.map(c => c.name) : [];
-    return buildResult(columns, rows, startTime, sql, schema);
-  }
+  // -----------------------------------------------------------------
+  // High-Fidelity Handlers for Specific Complex Aggregations & Joins
+  // -----------------------------------------------------------------
 
-  // 2. Highest paid employees: SELECT ... FROM employees ORDER BY salary DESC LIMIT 5
-  if (lowerSql.includes('from employees') && lowerSql.includes('order by salary desc') && lowerSql.includes('limit 5')) {
-    const empTable = schema.tables.find(t => t.name === 'employees');
-    if (empTable) {
-      const sorted = [...empTable.data]
-        .sort((a, b) => Number(b.salary) - Number(a.salary))
-        .slice(0, 5);
-      const cols = ['employee_id', 'first_name', 'last_name', 'job_title', 'salary', 'city'];
-      const filteredRows = sorted.map(row => {
-        const out: Record<string, any> = {};
-        cols.forEach(c => out[c] = row[c]);
-        return out;
-      });
-      return buildResult(cols, filteredRows, startTime, sql, schema);
-    }
-  }
-
-  // 3. Count employees in each department (JOIN + GROUP BY)
-  if (lowerSql.includes('count(e.employee_id)') && lowerSql.includes('departments')) {
+  // 1. Count employees in each department (JOIN + GROUP BY)
+  if (lowerSql.includes('count(') && lowerSql.includes('departments') && lowerSql.includes('group by')) {
     const empTable = schema.tables.find(t => t.name === 'employees');
     const deptTable = schema.tables.find(t => t.name === 'departments');
     if (empTable && deptTable) {
@@ -69,49 +47,44 @@ export async function executeSql(
     }
   }
 
-  // 4. Customers from Chennai
-  if (lowerSql.includes('from customers') && lowerSql.includes("city = 'chennai'")) {
+  // 2. Customers with NO orders (LEFT JOIN ... WHERE order_id IS NULL)
+  if (lowerSql.includes('left join orders') && (lowerSql.includes('is null') || lowerSql.includes('o.order_id is null'))) {
     const custTable = schema.tables.find(t => t.name === 'customers');
-    if (custTable) {
-      const rows = custTable.data.filter(c => String(c.city).toLowerCase() === 'chennai');
-      const cols = ['customer_id', 'customer_name', 'contact_email', 'city', 'country', 'segment'];
+    const orderTable = schema.tables.find(t => t.name === 'orders');
+    if (custTable && orderTable) {
+      const orderCustIds = new Set(orderTable.data.map(o => o.customer_id));
+      const noOrderCusts = custTable.data.filter(c => !orderCustIds.has(c.customer_id));
+      const cols = ['customer_id', 'customer_name', 'contact_email', 'city', 'segment'];
+      const rows = noOrderCusts.map(c => {
+        const out: Record<string, any> = {};
+        cols.forEach(col => out[col] = c[col]);
+        return out;
+      });
       return buildResult(cols, rows, startTime, sql, schema);
     }
   }
 
-  // 5. Calculate average salary: AVG(salary)
-  if (lowerSql.includes('avg(salary)')) {
-    const empTable = schema.tables.find(t => t.name === 'employees');
-    if (empTable) {
-      const salaries = empTable.data.map(e => Number(e.salary));
-      const total = salaries.reduce((a, b) => a + b, 0);
-      const avg = (total / salaries.length).toFixed(2);
-      const min = Math.min(...salaries);
-      const max = Math.max(...salaries);
-      const row = {
-        average_salary: Number(avg),
-        min_salary: min,
-        max_salary: max,
-        total_employees: salaries.length
-      };
-      return buildResult(['average_salary', 'min_salary', 'max_salary', 'total_employees'], [row], startTime, sql, schema);
+  // 3. Total order volume per customer (JOIN + GROUP BY)
+  if (lowerSql.includes('sum(') && lowerSql.includes('customers') && lowerSql.includes('orders') && lowerSql.includes('group by')) {
+    const custTable = schema.tables.find(t => t.name === 'customers');
+    const orderTable = schema.tables.find(t => t.name === 'orders');
+    if (custTable && orderTable) {
+      const rows = custTable.data.map(c => {
+        const custOrders = orderTable.data.filter(o => o.customer_id === c.customer_id);
+        const total = custOrders.reduce((sum, curr) => sum + Number(curr.total_amount), 0);
+        return {
+          customer_name: c.customer_name,
+          city: c.city,
+          total_orders: custOrders.length,
+          total_spent: total
+        };
+      }).sort((a, b) => b.total_spent - a.total_spent);
+      return buildResult(['customer_name', 'city', 'total_orders', 'total_spent'], rows, startTime, sql, schema);
     }
   }
 
-  // 6. Employees earning above 50,000
-  if (lowerSql.includes('salary > 50000')) {
-    const empTable = schema.tables.find(t => t.name === 'employees');
-    if (empTable) {
-      const filtered = empTable.data
-        .filter(e => Number(e.salary) > 50000)
-        .sort((a, b) => Number(b.salary) - Number(a.salary));
-      const cols = ['employee_id', 'first_name', 'last_name', 'job_title', 'salary', 'city'];
-      return buildResult(cols, filtered, startTime, sql, schema);
-    }
-  }
-
-  // 7. Employees JOIN departments
-  if (lowerSql.includes('from employees') && lowerSql.includes('join departments')) {
+  // 4. Employees JOIN Departments
+  if (lowerSql.includes('from employees') && lowerSql.includes('join departments') && !lowerSql.includes('group by')) {
     const empTable = schema.tables.find(t => t.name === 'employees');
     const deptTable = schema.tables.find(t => t.name === 'departments');
     if (empTable && deptTable) {
@@ -130,46 +103,46 @@ export async function executeSql(
     }
   }
 
-  // 8. Customers with NO orders (LEFT JOIN ... WHERE order_id IS NULL)
-  if (lowerSql.includes('left join orders') && lowerSql.includes('order_id is null')) {
-    const custTable = schema.tables.find(t => t.name === 'customers');
-    const orderTable = schema.tables.find(t => t.name === 'orders');
-    if (custTable && orderTable) {
-      const orderCustIds = new Set(orderTable.data.map(o => o.customer_id));
-      const noOrderCusts = custTable.data.filter(c => !orderCustIds.has(c.customer_id));
-      const cols = ['customer_id', 'customer_name', 'contact_email', 'city', 'segment'];
-      return buildResult(cols, noOrderCusts, startTime, sql, schema);
+  // 5. Overall Average / Min / Max Aggregate on Employees
+  if (lowerSql.includes('avg(salary)') && !lowerSql.includes('group by')) {
+    const empTable = schema.tables.find(t => t.name === 'employees');
+    if (empTable) {
+      const salaries = empTable.data.map(e => Number(e.salary));
+      const total = salaries.reduce((a, b) => a + b, 0);
+      const avg = (total / salaries.length).toFixed(2);
+      const min = Math.min(...salaries);
+      const max = Math.max(...salaries);
+      const row = {
+        average_salary: Number(avg),
+        min_salary: min,
+        max_salary: max,
+        total_employees: salaries.length
+      };
+      return buildResult(['average_salary', 'min_salary', 'max_salary', 'total_employees'], [row], startTime, sql, schema);
     }
   }
 
-  // 9. Total order volume per customer
-  if (lowerSql.includes('sum(o.total_amount)') && lowerSql.includes('customers')) {
-    const custTable = schema.tables.find(t => t.name === 'customers');
-    const orderTable = schema.tables.find(t => t.name === 'orders');
-    if (custTable && orderTable) {
-      const rows = custTable.data.map(c => {
-        const custOrders = orderTable.data.filter(o => o.customer_id === c.customer_id);
-        const total = custOrders.reduce((sum, curr) => sum + Number(curr.total_amount), 0);
-        return {
-          customer_name: c.customer_name,
-          city: c.city,
-          total_orders: custOrders.length,
-          total_spent: total
-        };
-      }).sort((a, b) => b.total_spent - a.total_spent);
-      return buildResult(['customer_name', 'city', 'total_orders', 'total_spent'], rows, startTime, sql, schema);
+  // 6. Overall Average Budget on Departments
+  if (lowerSql.includes('avg(budget)') && !lowerSql.includes('group by')) {
+    const deptTable = schema.tables.find(t => t.name === 'departments');
+    if (deptTable) {
+      const budgets = deptTable.data.map(d => Number(d.budget));
+      const total = budgets.reduce((a, b) => a + b, 0);
+      const avg = (total / budgets.length).toFixed(2);
+      const min = Math.min(...budgets);
+      const max = Math.max(...budgets);
+      const row = {
+        average_budget: Number(avg),
+        min_budget: min,
+        max_budget: max,
+        total_departments: budgets.length
+      };
+      return buildResult(['average_budget', 'min_budget', 'max_budget', 'total_departments'], [row], startTime, sql, schema);
     }
   }
 
-  // 10. Empty result test case: "SELECT * FROM customers WHERE city = 'Atlantis'"
-  if (lowerSql.includes("where city = 'atlantis'")) {
-    const custTable = schema.tables.find(t => t.name === 'customers');
-    const cols = custTable ? custTable.columns.map(c => c.name) : ['customer_id', 'customer_name', 'city'];
-    return buildResult(cols, [], startTime, sql, schema);
-  }
-
-  // SaaS specific queries
-  if (lowerSql.includes('subscriptions') && lowerSql.includes('plans')) {
+  // 7. SaaS Subscriptions + Plans
+  if (lowerSql.includes('subscriptions') && lowerSql.includes('plans') && lowerSql.includes('group by')) {
     const subTable = schema.tables.find(t => t.name === 'subscriptions');
     const planTable = schema.tables.find(t => t.name === 'plans');
     if (subTable && planTable) {
@@ -192,46 +165,62 @@ export async function executeSql(
     }
   }
 
-  // General Fallback Query Parser:
-  // Identify main table from FROM clause
-  const fromMatch = lowerSql.match(/from\s+([a-zA-Z0-9_]+)/);
-  const targetTableName = fromMatch ? fromMatch[1] : '';
+  // -----------------------------------------------------------------
+  // General Robust In-Memory Execution Engine
+  // -----------------------------------------------------------------
+
+  // 1. Identify primary FROM table
+  const fromMatch = lowerSql.match(/\bfrom\s+([a-zA-Z0-9_]+)/i);
+  const targetTableName = fromMatch ? fromMatch[1].toLowerCase() : '';
   const targetTable = schema.tables.find(t => t.name.toLowerCase() === targetTableName);
 
   if (!targetTable) {
     throw new Error(`Execution Error: Table '${targetTableName}' could not be resolved in execution catalog.`);
   }
 
-  let resultData = [...targetTable.data];
+  let resultData = targetTable.data.map(item => ({ ...item }));
 
-  // Simple WHERE equality or greater-than filter
-  const whereMatch = lowerSql.match(/where\s+([a-zA-Z0-9_]+)\s*(=|>|<|>=|<=|!=)\s*('?[^';]+'?)/i);
-  if (whereMatch) {
-    const col = whereMatch[1];
-    const op = whereMatch[2];
-    let val = whereMatch[3].trim().replace(/^'|'$/g, '');
-
-    resultData = resultData.filter(row => {
-      const rowVal = row[col];
-      if (rowVal === undefined) return true;
-      if (op === '=') return String(rowVal).toLowerCase() === val.toLowerCase();
-      if (op === '!=') return String(rowVal).toLowerCase() !== val.toLowerCase();
-      if (op === '>') return Number(rowVal) > Number(val);
-      if (op === '<') return Number(rowVal) < Number(val);
-      if (op === '>=') return Number(rowVal) >= Number(val);
-      if (op === '<=') return Number(rowVal) <= Number(val);
-      return true;
+  // 2. Process WHERE clause
+  const whereIndex = lowerSql.indexOf('where');
+  if (whereIndex !== -1) {
+    // Extract everything between WHERE and GROUP BY / ORDER BY / LIMIT / ;
+    let whereClause = cleanSql.slice(whereIndex + 5);
+    const stopKeywords = [' group by', ' order by', ' limit ', ';'];
+    let lowestStop = whereClause.length;
+    stopKeywords.forEach(kw => {
+      const idx = whereClause.toLowerCase().indexOf(kw);
+      if (idx !== -1 && idx < lowestStop) {
+        lowestStop = idx;
+      }
     });
+    whereClause = whereClause.slice(0, lowestStop).trim();
+
+    // Execute filter
+    resultData = resultData.filter(row => evaluateCondition(row, whereClause));
   }
 
-  // Simple ORDER BY
-  const orderMatch = lowerSql.match(/order by\s+([a-zA-Z0-9_]+)(\s+(asc|desc))?/i);
+  // 3. Process COUNT(*) aggregate without GROUP BY
+  if (lowerSql.includes('count(') && !lowerSql.includes('group by')) {
+    const countColMatch = cleanSql.match(/count\((.*?)\)(\s+as\s+([a-zA-Z0-9_]+))?/i);
+    const colAlias = countColMatch && countColMatch[3] ? countColMatch[3] : 'total_count';
+    const row = { [colAlias]: resultData.length };
+    return buildResult([colAlias], [row], startTime, sql, schema);
+  }
+
+  // 4. Process ORDER BY
+  const orderMatch = cleanSql.match(/order by\s+([a-zA-Z0-9_.]+)(\s+(asc|desc))?/i);
   if (orderMatch) {
-    const orderCol = orderMatch[1];
+    const rawOrderCol = orderMatch[1].trim();
+    const orderCol = rawOrderCol.split('.').pop() || rawOrderCol;
     const isDesc = orderMatch[3] ? orderMatch[3].toLowerCase() === 'desc' : false;
+
     resultData.sort((a, b) => {
       const valA = a[orderCol];
       const valB = b[orderCol];
+      if (valA === valB) return 0;
+      if (valA === null || valA === undefined) return 1;
+      if (valB === null || valB === undefined) return -1;
+
       if (typeof valA === 'number' && typeof valB === 'number') {
         return isDesc ? valB - valA : valA - valB;
       }
@@ -241,15 +230,101 @@ export async function executeSql(
     });
   }
 
-  // Simple LIMIT
-  const limitMatch = lowerSql.match(/limit\s+(\d+)/i);
+  // 5. Process LIMIT
+  const limitMatch = cleanSql.match(/limit\s+(\d+)/i);
   if (limitMatch) {
     const limitNum = parseInt(limitMatch[1], 10);
     resultData = resultData.slice(0, limitNum);
   }
 
-  const columns = targetTable.columns.map(c => c.name);
+  // 6. Column Projection: Extract selected columns
+  let columns: string[] = [];
+  const selectMatch = cleanSql.match(/select\s+(.*?)\s+from/is);
+  if (selectMatch) {
+    const rawCols = selectMatch[1].trim();
+    if (rawCols === '*') {
+      columns = targetTable.columns.map(c => c.name);
+    } else {
+      // Split by comma
+      const colItems = rawCols.split(',').map(c => c.trim());
+      columns = colItems.map(c => {
+        // If has AS alias
+        const asMatch = c.match(/\s+as\s+([a-zA-Z0-9_]+)/i);
+        if (asMatch) return asMatch[1];
+        // Strip table prefix: e.g. e.first_name -> first_name
+        return c.split('.').pop()?.replace(/[`"]/g, '').trim() || c;
+      });
+
+      // Filter rows to only project these columns
+      resultData = resultData.map(row => {
+        const out: Record<string, any> = {};
+        columns.forEach(col => {
+          out[col] = row[col] !== undefined ? row[col] : null;
+        });
+        return out;
+      });
+    }
+  } else {
+    columns = targetTable.columns.map(c => c.name);
+  }
+
   return buildResult(columns, resultData, startTime, sql, schema);
+}
+
+/**
+ * Evaluates a SQL WHERE condition against a data row
+ */
+function evaluateCondition(row: Record<string, any>, whereClause: string): boolean {
+  // Support boolean checks (e.g. is_active = true / 1)
+  const boolMatch = whereClause.match(/([a-zA-Z0-9_.]+)\s*=\s*(true|false|1|0)/i);
+  if (boolMatch) {
+    const col = boolMatch[1].split('.').pop() || boolMatch[1];
+    const expected = boolMatch[2].toLowerCase() === 'true' || boolMatch[2] === '1';
+    return Boolean(row[col]) === expected;
+  }
+
+  // Support IS NULL
+  const isNullMatch = whereClause.match(/([a-zA-Z0-9_.]+)\s+is\s+null/i);
+  if (isNullMatch) {
+    const col = isNullMatch[1].split('.').pop() || isNullMatch[1];
+    return row[col] === null || row[col] === undefined;
+  }
+
+  // Support numeric comparison (> , < , >= , <= , !=)
+  const numOpMatch = whereClause.match(/([a-zA-Z0-9_.]+)\s*(>=|<=|>|<|!=)\s*(\d+(\.\d+)?)/i);
+  if (numOpMatch) {
+    const col = numOpMatch[1].split('.').pop() || numOpMatch[1];
+    const op = numOpMatch[2];
+    const targetVal = parseFloat(numOpMatch[3]);
+    const rowVal = parseFloat(row[col]);
+
+    if (isNaN(rowVal)) return false;
+    if (op === '>') return rowVal > targetVal;
+    if (op === '<') return rowVal < targetVal;
+    if (op === '>=') return rowVal >= targetVal;
+    if (op === '<=') return rowVal <= targetVal;
+    if (op === '!=') return rowVal !== targetVal;
+  }
+
+  // Support String or Numeric equality (=)
+  const eqMatch = whereClause.match(/([a-zA-Z0-9_.]+)\s*=\s*('([^']*)'|"([^"]*)"|([a-zA-Z0-9_]+))/i);
+  if (eqMatch) {
+    const col = eqMatch[1].split('.').pop() || eqMatch[1];
+    const targetVal = (eqMatch[3] ?? eqMatch[4] ?? eqMatch[5] ?? '').trim().toLowerCase();
+    const rowVal = String(row[col] ?? '').trim().toLowerCase();
+    return rowVal === targetVal;
+  }
+
+  // Support LIKE / ILIKE
+  const likeMatch = whereClause.match(/([a-zA-Z0-9_.]+)\s+(i?like)\s+'%?([^'%]+)%?'/i);
+  if (likeMatch) {
+    const col = likeMatch[1].split('.').pop() || likeMatch[1];
+    const targetVal = likeMatch[3].toLowerCase();
+    const rowVal = String(row[col] ?? '').toLowerCase();
+    return rowVal.includes(targetVal);
+  }
+
+  return true;
 }
 
 function buildResult(
@@ -264,7 +339,7 @@ function buildResult(
     columns,
     rows,
     totalRows: rows.length,
-    executionTimeMs: Math.max(executionTimeMs, 12.4),
+    executionTimeMs: Math.max(executionTimeMs, 14.5),
     rawSql,
     generatedAt: new Date().toLocaleTimeString(),
     databaseName: schema.name,
